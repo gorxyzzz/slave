@@ -1,3 +1,9 @@
 zheng_bin
 zhengd_bin
+zheng
+zhengd
 zheng.db
+*.c
+*.so
+*.dylib
+*.o
