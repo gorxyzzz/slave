@@ -155,6 +155,36 @@ func printLPECheck(name, value string) {
 	fmt.Println()
 }
 
+func readLPEResults(c *Client) map[string]string {
+	results := make(map[string]string)
+	for {
+		var msg map[string]interface{}
+		if err := c.Decoder.Decode(&msg); err != nil {
+			fmt.Printf("connection lost: %v\n", err)
+			return results
+		}
+
+		status, _ := msg["status"].(string)
+
+		switch status {
+		case "lpe_check":
+			name, _ := msg["name"].(string)
+			cmd, _ := msg["cmd"].(string)
+			fmt.Printf("%s> [%s]%s %s\n", colorGreen, name, colorReset, cmd)
+		case "lpe_skip":
+			name, _ := msg["name"].(string)
+			fmt.Printf("%s> [%s] SKIP%s\n", colorRed, name, colorReset)
+		default:
+			for k, v := range msg {
+				if str, ok := v.(string); ok {
+					results[k] = str
+				}
+			}
+			return results
+		}
+	}
+}
+
 func printPrompt() {
 	if notifications > 0 {
 		fmt.Printf("%szheng %s[%d]%s> ", colorBold, colorYellow, notifications, colorReset)
@@ -417,38 +447,8 @@ func main() {
 			fmt.Printf("%s[*] running LPE checks (skipping: %v)...%s\n", colorCyan, skipList, colorReset)
 			fmt.Println()
 
-			// Read progress messages and final results
-			lpeResults := make(map[string]string)
-			for {
-				var msg map[string]interface{}
-				if err := c.Decoder.Decode(&msg); err != nil {
-					fmt.Printf("connection lost: %v\n", err)
-					break
-				}
-
-				status, _ := msg["status"].(string)
-
-				switch status {
-				case "lpe_check":
-					name, _ := msg["name"].(string)
-					cmd, _ := msg["cmd"].(string)
-					fmt.Printf("%s> [%s]%s %s\n", colorGreen, name, colorReset, cmd)
-
-				case "lpe_skip":
-					name, _ := msg["name"].(string)
-					fmt.Printf("%s> [%s] SKIP%s\n", colorRed, name, colorReset)
-
-				default:
-					// No status = final results
-					for k, v := range msg {
-						if str, ok := v.(string); ok {
-							lpeResults[k] = str
-						}
-					}
-					goto lpeDone
-				}
-			}
-		lpeDone:
+			// Read progress and results
+			lpeResults := readLPEResults(c)
 
 			fmt.Println()
 			fmt.Printf("%s=== LPE RESULTS for %s@%s ===%s\n", colorBold, c.Recon.Username, c.Recon.Hostname, colorReset)
