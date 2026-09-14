@@ -71,6 +71,15 @@ func main() {
 		case "ping":
 			encoder.Encode(map[string]string{"status": "pong"})
 
+		case "persist":
+			fmt.Fprintf(os.Stderr, "persisting...\n")
+			result, err := persist()
+			if err != nil {
+				encoder.Encode(map[string]string{"status": "persist_fail", "error": err.Error()})
+			} else {
+				encoder.Encode(map[string]string{"status": "persisted", "detail": result})
+			}
+
 		case "lpe":
 			fmt.Fprintf(os.Stderr, "running LPE checks...\n")
 			encoder.Encode(map[string]string{"status": "lpe_running"})
