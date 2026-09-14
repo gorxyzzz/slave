@@ -1,4 +1,4 @@
-package lpe
+package main
 
 import (
 	"bytes"
@@ -16,12 +16,12 @@ type Recon struct {
 	PublicIP string `json:"public_ip"`
 }
 
-type Check struct {
+type LPECheck struct {
 	Name    string
 	Command string
 }
 
-var Checks = []Check{
+var lpeChecks = []LPECheck{
 	{"os_info", "uname -a; cat /etc/os-release 2>/dev/null || cat /etc/issue 2>/dev/null"},
 	{"sudo", "sudo -nl 2>/dev/null"},
 	{"suid", "find / -perm -4000 -type f 2>/dev/null | head -30"},
@@ -35,7 +35,7 @@ var Checks = []Check{
 	{"interesting_files", "ls -la ~/.ssh/ 2>/dev/null; find / -name '*.key' -o -name 'id_rsa' -o -name 'token' -o -name '.env' 2>/dev/null | head -20; cat /etc/passwd | grep -v nologin | grep -v false | head -10"},
 }
 
-func RunShell(script string) string {
+func runShell(script string) string {
 	cmd := exec.Command("/bin/sh", "-c", script)
 	var out bytes.Buffer
 	cmd.Stdout = &out

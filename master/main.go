@@ -12,7 +12,6 @@ import (
 	"time"
 
 	_ "modernc.org/sqlite"
-	"zheng/lpe"
 )
 
 const PORT = "4443"
@@ -27,11 +26,21 @@ const (
 	colorBold   = "\033[1m"
 )
 
+type Recon struct {
+	Hostname string `json:"hostname"`
+	Username string `json:"username"`
+	OS       string `json:"os"`
+	Arch     string `json:"arch"`
+	Kernel   string `json:"kernel"`
+	IP       string `json:"ip"`
+	PublicIP string `json:"public_ip"`
+}
+
 type Client struct {
 	ID      int
 	Conn    net.Conn
 	Addr    string
-	Recon   lpe.Recon
+	Recon   Recon
 	Encoder *json.Encoder
 	Decoder *json.Decoder
 }
@@ -70,7 +79,7 @@ func initDB() {
 	}
 }
 
-func dbUpsertClient(id int, recon lpe.Recon, addr string, active bool) {
+func dbUpsertClient(id int, recon Recon, addr string, active bool) {
 	now := time.Now().Format(time.RFC3339)
 	activeInt := 0
 	if active {
@@ -113,7 +122,7 @@ func getAllClients() []map[string]interface{} {
 	return result
 }
 
-func addClient(conn net.Conn, recon lpe.Recon, decoder *json.Decoder, encoder *json.Encoder) *Client {
+func addClient(conn net.Conn, recon Recon, decoder *json.Decoder, encoder *json.Encoder) *Client {
 	c := &Client{
 		ID:      nextID,
 		Conn:    conn,
@@ -512,7 +521,7 @@ func handleConnection(conn net.Conn) {
 	decoder := json.NewDecoder(conn)
 	encoder := json.NewEncoder(conn)
 
-	var recon lpe.Recon
+	var recon Recon
 	if err := decoder.Decode(&recon); err != nil {
 		fmt.Fprintf(os.Stderr, "failed to read recon from %s: %v\n", conn.RemoteAddr(), err)
 		conn.Close()
