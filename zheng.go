@@ -33,7 +33,7 @@ type Recon struct {
 	Arch     string `json:"arch"`
 	Kernel   string `json:"kernel"`
 	IP       string `json:"ip"`
-	PublicIP       string `json:"public_ip"`
+	PublicIP string `json:"public_ip"`
 }
 
 type Client struct {
@@ -87,12 +87,12 @@ func dbUpsertClient(id int, recon Recon, addr string, active bool) {
 	}
 
 	_, err := db.Exec(`
-		INSERT INTO clients (id, ip, hostname, username, os, arch, first_seen, last_seen, active)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO clients (id, ip, public_ip, hostname, username, os, arch, first_seen, last_seen, active)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
-			ip=excluded.ip, hostname=excluded.hostname, username=excluded.username,
+			ip=excluded.ip, public_ip=excluded.public_ip, hostname=excluded.hostname, username=excluded.username,
 			os=excluded.os, arch=excluded.arch, last_seen=excluded.last_seen, active=excluded.active`,
-		id, recon.IP, recon.Hostname, recon.Username, recon.OS, recon.Arch, now, now, activeInt)
+		id, recon.IP, recon.PublicIP, recon.Hostname, recon.Username, recon.OS, recon.Arch, now, now, activeInt)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "db upsert error: %v\n", err)
 	}
@@ -103,7 +103,7 @@ func dbMarkInactive(id int) {
 }
 
 func getAllClients() []map[string]interface{} {
-	rows, err := db.Query("SELECT id, ip, hostname, username, os, arch, first_seen, last_seen, active FROM clients ORDER BY id")
+	rows, err := db.Query("SELECT id, ip, public_ip, hostname, username, os, arch, first_seen, last_seen, active FROM clients ORDER BY id")
 	if err != nil {
 		return nil
 	}
@@ -112,10 +112,10 @@ func getAllClients() []map[string]interface{} {
 	var result []map[string]interface{}
 	for rows.Next() {
 		var id, active int
-		var ip, hostname, username, os, arch, firstSeen, lastSeen string
-		rows.Scan(&id, &ip, &hostname, &username, &os, &arch, &firstSeen, &lastSeen, &active)
+		var ip, publicIP, hostname, username, os, arch, firstSeen, lastSeen string
+		rows.Scan(&id, &ip, &publicIP, &hostname, &username, &os, &arch, &firstSeen, &lastSeen, &active)
 		result = append(result, map[string]interface{}{
-			"id": id, "ip": ip, "hostname": hostname, "username": username,
+			"id": id, "ip": ip, "public_ip": publicIP, "hostname": hostname, "username": username,
 			"os": os, "arch": arch, "first_seen": firstSeen, "last_seen": lastSeen, "active": active,
 		})
 	}
@@ -162,14 +162,15 @@ func listClients() {
 	}
 
 	fmt.Println()
-	fmt.Printf("%-4s %-8s %-21s %-15s %-15s %-10s %-6s %-10s\n",
-		"ID", "STATUS", "ADDR", "IP", "HOSTNAME", "USER", "OS", "LAST SEEN")
-	fmt.Println(strings.Repeat("-", 95))
+	fmt.Printf("%-4s %-8s %-21s %-15s %-15s %-15s %-10s %-6s %-10s\n",
+		"ID", "STATUS", "ADDR", "PUBLIC IP", "IP", "HOSTNAME", "USER", "OS", "LAST SEEN")
+	fmt.Println(strings.Repeat("-", 110))
 
 	for _, row := range allClients {
 		id := row["id"].(int)
 		active := row["active"].(int)
 		ip := row["ip"].(string)
+		publicIP := row["public_ip"].(string)
 		hostname := row["hostname"].(string)
 		username := row["username"].(string)
 		osName := row["os"].(string)
@@ -188,8 +189,12 @@ func listClients() {
 			}
 		}
 
-		fmt.Printf("%-4d %-18s %-21s %-15s %-15s %-10s %-6s %-10s\n",
-			id, status, addr, ip, hostname, username, osName, lastSeen)
+		if publicIP == "" {
+			publicIP = "-"
+		}
+
+		fmt.Printf("%-4d %-18s %-21s %-15s %-15s %-15s %-10s %-6s %-10s\n",
+			id, status, addr, publicIP, ip, hostname, username, osName, lastSeen)
 	}
 	fmt.Println()
 

