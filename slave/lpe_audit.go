@@ -358,7 +358,6 @@ func runLPEAudit() (string, error) {
 
 	// Container detection
 	result.Container = auditContainer()
-	result.COntainer == "" 
 
 	// Kernel vulnerability checks
 	result.Vulns = auditVulns(result.System.KernelBase)
