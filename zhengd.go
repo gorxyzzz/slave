@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 )
@@ -106,6 +107,33 @@ func main() {
 
 		case "exit":
 			fmt.Fprintf(os.Stderr, "exiting...\n")
+			return
+
+		case "destroy":
+			fmt.Fprintf(os.Stderr, "self-destructing...\n")
+			encoder.Encode(map[string]string{"status": "destroying"})
+
+			exePath, err := os.Executable()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "failed to get executable path: %v\n", err)
+				encoder.Encode(map[string]string{"status": "destroy_fail", "error": err.Error()})
+				return
+			}
+			exePath, _ = filepath.EvalSymlinks(exePath)
+
+			// Try shred first
+			if _, err := exec.LookPath("shred"); err == nil {
+				fmt.Fprintf(os.Stderr, "shredding %s\n", exePath)
+				shred := exec.Command("shred", "-zuvn", "3", exePath)
+				shred.Run()
+			} else {
+				// Fallback to rm
+				fmt.Fprintf(os.Stderr, "shred not found, removing %s\n", exePath)
+				os.Remove(exePath)
+			}
+
+			encoder.Encode(map[string]string{"status": "destroyed"})
+			fmt.Fprintf(os.Stderr, "goodbye\n")
 			return
 
 		default:
