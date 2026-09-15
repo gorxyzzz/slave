@@ -205,7 +205,7 @@ func listClients() {
 	}
 
 	fmt.Println()
-	fmt.Printf("%-4s %-8s %-23s %-15s %-15s %-15s %-10s %-6s %-10s\n",
+	fmt.Printf("%-4s %-9s %-21s %-15s %-15s %-15s %-10s %-6s %-10s\n",
 		"ID", "STATUS", "ADDR", "PUBLIC IP", "IP", "HOSTNAME", "USER", "OS", "LAST SEEN")
 	fmt.Println(strings.Repeat("-", 110))
 
