@@ -424,7 +424,7 @@ func main() {
 
 		switch cmd {
 		case "/clients":
-			onlyActive := parts[1] == "active"
+			onlyActive := len(parts) > 2 && parts[1] == "active"
 			listClients(onlyActive)
 
 		case "/check":
