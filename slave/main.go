@@ -68,11 +68,11 @@ func runSession(addr string) error {
 
 			encoder.Encode(map[string]string{"status": "shell_ready"})
 
-			if err := cmd.Run(); err != nil {
-				fmt.Fprintf(os.Stderr, "shell exited: %v\n", err)
-			}
+			cmd.Run()
 
-			fmt.Fprintf(conn, "\n__ZHENG_SHELL_DONE__\n")
+			// Close connection so master's io.Copy returns, then we reconnect
+			conn.Close()
+			return nil
 
 		case "exit":
 			fmt.Fprintf(os.Stderr, "exiting...\n")

