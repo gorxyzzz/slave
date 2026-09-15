@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"time"
 )
@@ -372,9 +371,4 @@ func runLPEAudit() (string, error) {
 	}
 
 	return string(data), nil
-}
-
-func init() {
-	// Suppress unused import errors
-	_ = runtime.GOOS
 }

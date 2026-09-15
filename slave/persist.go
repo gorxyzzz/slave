@@ -257,3 +257,28 @@ func persist() (string, error) {
 		return "", fmt.Errorf("unsupported init system")
 	}
 }
+
+func destroyService() {
+	serviceName := "zheng.service"
+
+	// Try systemd
+	servicePath := "/etc/systemd/system/" + serviceName
+	if _, err := os.Stat(servicePath); err == nil {
+		exec.Command("systemctl", "stop", serviceName).Run()
+		exec.Command("systemctl", "disable", serviceName).Run()
+		os.Remove(servicePath)
+		exec.Command("systemctl", "daemon-reload").Run()
+	}
+
+	// Try runit
+	os.RemoveAll("/etc/sv/zheng")
+
+	// Try openrc / sysv
+	initScript := "/etc/init.d/zheng"
+	if _, err := os.Stat(initScript); err == nil {
+		exec.Command(initScript, "stop").Run()
+		os.Remove(initScript)
+	}
+
+	os.Remove("/var/run/zheng.pid")
+}

