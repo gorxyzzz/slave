@@ -24,7 +24,7 @@ func gatherRecon(conn net.Conn) Recon {
 }
 
 func getPublicIP(conn net.Conn) string {
-	tcpAddr := conn.LocalAddr().(*net.TCPAddr)
+	tcpAddr := conn.RemoteAddr().(*net.TCPAddr)
 	return tcpAddr.IP.String()
 }
 

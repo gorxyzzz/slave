@@ -3,12 +3,15 @@ package main
 import (
 	"encoding/json"
 	"flag"
+	"io"
 	"fmt"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/creack/pty"
 )
 
 func main() {
@@ -50,18 +53,25 @@ func main() {
 
 		switch strings.TrimSpace(msg.Cmd) {
 		case "shell":
-			fmt.Fprintf(os.Stderr, "spawning shell...\n")
 			cmd := exec.Command("/bin/sh")
-			cmd.Stdin = conn
-			cmd.Stdout = conn
-			cmd.Stderr = conn
 
-			encoder.Encode(map[string]string{"status": "shell_ready"})
-
-			if err := cmd.Run(); err != nil {
-				fmt.Fprintf(os.Stderr, "shell exited: %v\n", err)
+			ptyFile, err := pty.Start(cmd)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "failed to start pty: %v\n", err)
+				return
 			}
+			defer ptyFile.Close()
 
+			encoder := json.NewEncoder(conn)
+			_ = encoder.Encode(map[string]string{"status": "shell_ready"})
+
+			go func() {
+				_, _ = io.Copy(conn, ptyFile)
+			}()
+
+			_, _ = io.Copy(ptyFile, conn)
+
+			_ = cmd.Wait()
 			fmt.Fprintf(conn, "\n__ZHENG_SHELL_DONE__\n")
 
 		case "exit":
