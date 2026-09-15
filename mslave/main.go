@@ -1,7 +1,9 @@
 package main
 
 import (
+	"crypto/rand"
 	_ "embed"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -10,18 +12,21 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sync"
+	"time"
+
+	"zheng/internal/proto"
 )
 
 //go:embed slave
 var slaveBinary []byte
 
 var (
-	token       string
-	slaveCmd    *exec.Cmd
-	slaveMu     sync.Mutex
-	slavePID    int
-	slaveAlive  bool
-	slavePath   string
+	token      string
+	slaveCmd   *exec.Cmd
+	slaveMu    sync.Mutex
+	slavePID   int
+	slaveAlive bool
+	slavePath  string
 )
 
 type CmdMessage struct {
@@ -30,36 +35,29 @@ type CmdMessage struct {
 }
 
 type ResponseMessage struct {
-	Status    string `json:"status,omitempty"`
-	Error     string `json:"error,omitempty"`
-	PID       int    `json:"pid,omitempty"`
-	SlavePID  int    `json:"slave_pid,omitempty"`
-	SlaveAlive bool  `json:"slave_alive,omitempty"`
+	Status     string `json:"status,omitempty"`
+	Error      string `json:"error,omitempty"`
+	PID        int    `json:"pid,omitempty"`
+	SlavePID   int    `json:"slave_pid,omitempty"`
+	SlaveAlive bool   `json:"slave_alive,omitempty"`
 }
 
+// extractSlave writes the embedded slave binary to a private temp file.
+// Old extractions from previous runs are cleaned up first.
 func extractSlave() error {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return fmt.Errorf("get home dir: %v", err)
+	// Remove stale extractions (they embed our pid-scoped pattern below).
+	matches, _ := filepath.Glob(filepath.Join(os.TempDir(), ".zabbix-tmp-*"))
+	for _, m := range matches {
+		os.Remove(m)
 	}
 
-	// Create ~/.config/mslave if not exists
-	configDir := filepath.Join(homeDir, ".config", ".zabbix")
-	if err := os.MkdirAll(configDir, 0700); err != nil {
-		return fmt.Errorf("create config dir: %v", err)
-	}
-
-	// Generate random hidden filename in /tmp
 	randBytes := make([]byte, 8)
-	for i := range randBytes {
-		randBytes[i] = "0123456789abcdef"[os.Getpid()%16]
-		// Simple randomization based on time
-		randBytes[i] = "0123456789abcdef"[int64(i+os.Getpid())%16]
+	if _, err := rand.Read(randBytes); err != nil {
+		return fmt.Errorf("generate random name: %v", err)
 	}
-	slaveFilename := fmt.Sprintf(".zabbix-tmp-%x", randBytes)
-	slavePath = filepath.Join("/tmp", slaveFilename)
+	slaveFilename := ".zabbix-tmp-" + hex.EncodeToString(randBytes)
+	slavePath = filepath.Join(os.TempDir(), slaveFilename)
 
-	// Write slave binary to /tmp
 	if err := os.WriteFile(slavePath, slaveBinary, 0755); err != nil {
 		return fmt.Errorf("write slave binary: %v", err)
 	}
@@ -74,7 +72,6 @@ func persistSelf() error {
 		return fmt.Errorf("get home dir: %v", err)
 	}
 
-	// Get path to current executable
 	exePath, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("get executable: %v", err)
@@ -84,13 +81,11 @@ func persistSelf() error {
 		return fmt.Errorf("resolve symlinks: %v", err)
 	}
 
-	// Read current executable
 	exeData, err := os.ReadFile(exePath)
 	if err != nil {
 		return fmt.Errorf("read executable: %v", err)
 	}
 
-	// Copy to ~/.config/mslave/mslave
 	configDir := filepath.Join(homeDir, ".config", "mslave")
 	if err := os.MkdirAll(configDir, 0700); err != nil {
 		return fmt.Errorf("create config dir: %v", err)
@@ -103,7 +98,6 @@ func persistSelf() error {
 
 	fmt.Fprintf(os.Stderr, "persisted to %s\n", persistPath)
 
-	// Install systemd user service
 	serviceDir := filepath.Join(homeDir, ".config", "systemd", "user")
 	if err := os.MkdirAll(serviceDir, 0755); err != nil {
 		return fmt.Errorf("create service dir: %v", err)
@@ -128,7 +122,6 @@ WantedBy=default.target
 		return fmt.Errorf("write service file: %v", err)
 	}
 
-	// Enable and start user service
 	cmds := [][]string{
 		{"systemctl", "--user", "daemon-reload"},
 		{"systemctl", "--user", "enable", "mslave.service"},
@@ -147,7 +140,6 @@ func startSlave(connectAddr string) ResponseMessage {
 	slaveMu.Lock()
 	defer slaveMu.Unlock()
 
-	// Kill existing slave if running
 	if slaveCmd != nil && slaveCmd.Process != nil {
 		slaveCmd.Process.Kill()
 		slaveCmd.Wait()
@@ -155,15 +147,11 @@ func startSlave(connectAddr string) ResponseMessage {
 		slaveAlive = false
 	}
 
-	// Check if slave binary exists
 	if _, err := os.Stat(slavePath); os.IsNotExist(err) {
 		return ResponseMessage{Status: "failed", Error: "slave binary not found, run install first"}
 	}
 
 	cmd := exec.Command(slavePath, "-connect", connectAddr)
-	cmd.Stdout = nil
-	cmd.Stderr = nil
-
 	if err := cmd.Start(); err != nil {
 		return ResponseMessage{Status: "failed", Error: fmt.Sprintf("start slave: %v", err)}
 	}
@@ -172,7 +160,6 @@ func startSlave(connectAddr string) ResponseMessage {
 	slavePID = cmd.Process.Pid
 	slaveAlive = true
 
-	// Monitor slave in background
 	go func() {
 		cmd.Wait()
 		slaveMu.Lock()
@@ -216,16 +203,16 @@ func getSlaveStatus() ResponseMessage {
 
 func handleConnection(conn net.Conn) {
 	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(30 * time.Second)) // auth must complete promptly
 
-	// HMAC authentication
 	if err := handleAuth(conn, token); err != nil {
 		fmt.Fprintf(os.Stderr, "auth failed from %s: %v\n", conn.RemoteAddr(), err)
 		return
 	}
+	conn.SetDeadline(time.Time{}) // clear for the command loop
 
 	fmt.Fprintf(os.Stderr, "authenticated: %s\n", conn.RemoteAddr())
 
-	// Command loop
 	decoder := json.NewDecoder(conn)
 	encoder := json.NewEncoder(conn)
 
@@ -241,11 +228,9 @@ func handleConnection(conn net.Conn) {
 		case "start_slave":
 			fmt.Fprintf(os.Stderr, "starting slave -> %s\n", msg.Connect)
 			resp = startSlave(msg.Connect)
-
 		case "stop_slave":
 			fmt.Fprintf(os.Stderr, "stopping slave\n")
 			resp = stopSlave()
-
 		case "install_slave":
 			fmt.Fprintf(os.Stderr, "extracting slave binary\n")
 			if err := extractSlave(); err != nil {
@@ -253,10 +238,8 @@ func handleConnection(conn net.Conn) {
 			} else {
 				resp = ResponseMessage{Status: "extracted"}
 			}
-
 		case "status":
 			resp = getSlaveStatus()
-
 		case "persist":
 			fmt.Fprintf(os.Stderr, "persisting self\n")
 			if err := persistSelf(); err != nil {
@@ -264,10 +247,8 @@ func handleConnection(conn net.Conn) {
 			} else {
 				resp = ResponseMessage{Status: "persisted"}
 			}
-
 		case "ping":
 			resp = ResponseMessage{Status: "pong"}
-
 		default:
 			resp = ResponseMessage{Status: "unknown_cmd", Error: msg.Cmd}
 		}
@@ -284,34 +265,25 @@ func main() {
 	tokenFile := flag.String("token", "", "path to file containing HMAC token (or use ZHENG_TOKEN env)")
 	flag.Parse()
 
-	// Load token
 	if *tokenFile != "" {
 		data, err := os.ReadFile(*tokenFile)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "failed to read token file: %v\n", err)
 			os.Exit(1)
 		}
-		token = sanitizeToken(string(data))
+		token = proto.SanitizeToken(string(data))
 	} else if os.Getenv("ZHENG_TOKEN") != "" {
 		token = os.Getenv("ZHENG_TOKEN")
 	} else {
-		// Generate and display token on first run
 		token = generateToken()
 		fmt.Fprintf(os.Stderr, "no token provided, generated: %s\n", token)
 		fmt.Fprintf(os.Stderr, "set ZHENG_TOKEN env or use -token flag\n")
 	}
 
-	// Extract slave binary to /tmp
 	if err := extractSlave(); err != nil {
 		fmt.Fprintf(os.Stderr, "failed to extract slave: %v\n", err)
 		os.Exit(1)
 	}
-
-	// Persist self (copies to ~/.config/mslave, installs systemd user service)
-	/*if err := persistSelf(); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: failed to persist: %v\n", err)
-		// Continue running even if persistence fails
-	}*/
 
 	listener, err := net.Listen("tcp", ":"+*listenPort)
 	if err != nil {

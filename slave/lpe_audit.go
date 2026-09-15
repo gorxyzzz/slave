@@ -12,11 +12,11 @@ import (
 )
 
 type AuditResult struct {
-	Timestamp string          `json:"timestamp"`
-	System    SystemInfo      `json:"system"`
-	Container ContainerInfo   `json:"container"`
-	Vulns     VulnFindings    `json:"vulns"`
-	LPE       LPEFindings     `json:"lpe"`
+	Timestamp string        `json:"timestamp"`
+	System    SystemInfo    `json:"system"`
+	Container ContainerInfo `json:"container"`
+	Vulns     VulnFindings  `json:"vulns"`
+	LPE       LPEFindings   `json:"lpe"`
 }
 
 type SystemInfo struct {
@@ -35,10 +35,10 @@ type ContainerInfo struct {
 }
 
 type VulnFindings struct {
-	CopyFail    string `json:"copy_fail"`
-	DirtyFragESP  string `json:"dirtyfrag_esp"`
+	CopyFail       string `json:"copy_fail"`
+	DirtyFragESP   string `json:"dirtyfrag_esp"`
 	DirtyFragRxrpc string `json:"dirtyfrag_rxrpc"`
-	CrackArmor  string `json:"crackarmor"`
+	CrackArmor     string `json:"crackarmor"`
 }
 
 type LPEFindings struct {

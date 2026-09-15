@@ -2,8 +2,12 @@ zheng_bin
 zhengd_bin
 zheng
 zhengd
+zheng-master
+zheng-slave
 zheng.db
 *.c
 *.so
 *.dylib
 *.o
+build/
+mslave/slave/
